@@ -1,0 +1,62 @@
+{
+  "__inputs": [],
+  "dashboard": {
+    "id": null,
+    "title": "PlanBuddy DB + Queues",
+    "tags": ["db", "queue"],
+    "style": "dark",
+    "timezone": "browser",
+    "panels": [
+      {
+        "title": "DB Pool Usage",
+        "type": "gauge",
+        "targets": [
+          {"expr": "db_pool_used{state='used'}", "legendFormat": "Used"}
+        ],
+        "thresholds": {
+          "steps": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 70},
+            {"color": "red", "value": 90}
+          ]
+        }
+      },
+      {
+        "title": "Queue Depths",
+        "type": "bargauge",
+        "targets": [
+          {"expr": "queue_depth{state='waiting'}", "legendFormat": "{{queue}} waiting"}
+        ]
+      },
+      {
+        "title": "DB Lock Wait p95",
+        "type": "stat",
+        "targets": [
+          {"expr": "histogram_quantile(0.95, sum(rate(db_lock_wait_ms_bucket[5m])) by (le))", "legendFormat": "p95 ms"}
+        ],
+        "thresholds": {
+          "steps": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 100},
+            {"color": "red", "value": 250}
+          ]
+        },
+        "fieldConfig": {"defaults": {"unit": "ms"}}
+      },
+      {
+        "title": "Alerts Fired",
+        "type": "timeseries",
+        "targets": [
+          {"expr": "increase(alert_total[1h])", "legendFormat": "{{alert_type}} {{severity}}"}
+        ]
+      }
+    ],
+    "time": {"from": "now-1h", "to": "now"},
+    "timepicker": {},
+    "timezone": "",
+    "refresh": "30s",
+    "schemaVersion": 38,
+    "version": 1
+  },
+  "overwrite": true
+}

@@ -1,0 +1,59 @@
+{
+  "__inputs": [],
+  "dashboard": {
+    "id": null,
+    "title": "PlanBuddy Payment Health",
+    "tags": ["payment", "booking"],
+    "style": "dark",
+    "timezone": "browser",
+    "panels": [
+      {
+        "title": "Bookings Created",
+        "type": "stat",
+        "targets": [
+          {"expr": "increase(booking_created_total[5m])", "legendFormat": "Bookings"}
+        ],
+        "fieldConfig": {"defaults": {"unit": "reqps"}}
+      },
+      {
+        "title": "Payment Success Rate",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(increase(payment_attempt_total{status='success'}[5m])) / sum(increase(payment_attempt_total[5m])) * 100",
+            "legendFormat": "Success %"
+          }
+        ],
+        "thresholds": {
+          "steps": [
+            {"color": "red", "value": null},
+            {"color": "yellow", "value": 95},
+            {"color": "green", "value": 99}
+          ]
+        },
+        "fieldConfig": {"defaults": {"unit": "percent"}}
+      },
+      {
+        "title": "Idempotency Conflicts/min",
+        "type": "stat",
+        "targets": [
+          {"expr": "increase(idempotency_conflict_total[5m])", "legendFormat": "Conflicts"}
+        ],
+        "thresholds": {
+          "steps": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 5},
+            {"color": "red", "value": 10}
+          ]
+        }
+      }
+    ],
+    "time": {"from": "now-6h", "to": "now"},
+    "timepicker": {},
+    "timezone": "",
+    "refresh": "30s",
+    "schemaVersion": 38,
+    "version": 1
+  },
+  "overwrite": true
+}

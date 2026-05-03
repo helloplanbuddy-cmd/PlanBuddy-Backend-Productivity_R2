@@ -1,0 +1,56 @@
+groups:
+  - name: planbuddy_fintech_alerts
+    rules:
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~\"5..\"}[5m]) / rate(http_requests_total[5m]) > 0.01
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High error rate on {{ $labels.instance }}"
+          description: "Error rate > 1% for 2min (current: {{ $value | printf %.2f }}%)"
+
+      - alert: HighLatencyP95
+        expr: histogram_quantile(0.95, rate(http_request_duration_ms_bucket[5m])) > 500
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "P95 latency high"
+          description: "P95 > 500ms for 2min (current: {{ $value | printf %.0f }}ms)"
+
+      - alert: QueueBacklog
+        expr: queue_depth{state='waiting'} > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Queue backlog growing {{ $labels.queue }}"
+          description: "Waiting jobs > 100 (current: {{ $value }})"
+
+      - alert: LockContention
+        expr: histogram_quantile(0.95, rate(db_lock_wait_ms_bucket[5m])) > 250
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "DB lock contention high"
+          description: "P95 lock wait > 250ms"
+
+      - alert: IdempotencySpike
+        expr: increase(idempotency_conflict_total[5m]) > 10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Idempotency conflict spike"
+          description: "Conflicts >10/5min (current: {{ $value }})"
+
+      - alert: AlertStorm
+        expr: increase(alert_total{severity='critical'}[1h]) > 20
+        labels:
+          severity: critical
+        annotations:
+          summary: "Alert storm detected"
+          description: ">20 critical alerts/hour"
+

@@ -1,0 +1,17 @@
+version: '3.9'
+
+services:
+  api:
+    ports:
+      - "3000:3000"
+    networks:
+      - planbuddy_net
+
+  workers:
+    networks:
+      - planbuddy_net
+
+networks:
+  planbuddy_net:
+    external: true
+

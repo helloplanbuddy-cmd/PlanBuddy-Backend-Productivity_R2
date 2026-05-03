@@ -1,0 +1,143 @@
+'use strict';
+
+/**
+ * PHASE 3 FIX: dbService.js → cancelBooking() with SELECT FOR UPDATE on trips
+ *
+ * 🔥 PHASE 3 FIX — Concurrency hardening:
+ *
+ * PROBLEM: Concurrent cancellations could release capacity twice
+ *  Thread 1: SELECT booking (group_size=5)
+ *  Thread 2: SELECT booking (group_size=5)
+ *  Thread 1: UPDATE trips SET current = current - 5
+ *  Thread 2: UPDATE trips SET current = current - 5
+ *  Result: capacity released twice (underflow)
+ *
+ * SOLUTION: SELECT FOR UPDATE on trips row before capacity update
+ *  This serializes concurrent capacity updates on the same trip
+ */
+
+async function cancelBooking(bookingId, reason = '', requestedByUserId = null) {
+  return db.transaction(async (client) => {
+    // ── 1. Lock booking row (SELECT FOR UPDATE) ──────────────────────────────
+    // Prevents concurrent state changes to this booking
+    const bookingResult = await client.query(
+      `SELECT id, trip_id, group_size, status, payment_status
+       FROM bookings
+       WHERE id = $1
+       FOR UPDATE`,
+      [bookingId]
+    );
+
+    if (bookingResult.rows.length === 0) {
+      throw BookingStateMachine.makeError('Booking not found', 'BOOKING_NOT_FOUND', 404);
+    }
+
+    const booking = bookingResult.rows[0];
+
+    // Idempotent — already cancelled
+    if (booking.status === 'cancelled') return booking;
+
+    if (booking.status === 'completed') {
+      throw BookingStateMachine.makeError(
+        'Cannot cancel a completed booking',
+        'BOOKING_COMPLETED',
+        409
+      );
+    }
+
+    // ── 2. Lock trip row BEFORE capacity update (SELECT FOR UPDATE) ──────────
+    // 🔥 PHASE 3 FIX — Serialize concurrent capacity updates on same trip
+    // This prevents multiple concurrent cancellations from releasing capacity twice
+    const tripResult = await client.query(
+      `SELECT id, current_bookings, max_group_size
+       FROM trips
+       WHERE id = $1
+       FOR UPDATE`,
+      [booking.trip_id]
+    );
+
+    if (tripResult.rows.length === 0) {
+      throw BookingStateMachine.makeError('Trip not found', 'TRIP_NOT_FOUND', 404);
+    }
+
+    const trip = tripResult.rows[0];
+
+    // ── 3. Restore capacity only for unpaid pending bookings ──────────────────
+    // AND only if current_bookings >= group_size (safety check)
+    if (booking.status === 'pending' && booking.payment_status === 'unpaid') {
+      const updatedTrip = await client.query(
+        `UPDATE trips
+         SET current_bookings = GREATEST(current_bookings - $1, 0),
+             updated_at = NOW()
+         WHERE id = $2
+           AND current_bookings >= $1  -- 🔥 PHASE 3 FIX: Safety check (don't go negative)
+         RETURNING current_bookings`,
+        [booking.group_size, booking.trip_id]
+      );
+
+      if (updatedTrip.rowCount === 0) {
+        logger.warn('[dbService] Capacity safety check failed; possible concurrent cancellation', {
+          bookingId,
+          groupSize: booking.group_size,
+          tripId: booking.trip_id,
+          currentCapacity: trip.current_bookings,
+        });
+        // Still allow cancellation, but log the anomaly
+      }
+    }
+
+    // ── 4. Mark booking as cancelled ──────────────────────────────────────────
+    const cancelledBooking = await client.query(
+      `UPDATE bookings
+       SET status = 'cancelled',
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [bookingId]
+    );
+
+    // ── 5. Create refund job (if payment was captured) ───────────────────────
+    if (booking.payment_status === 'paid' || booking.payment_status === 'captured') {
+      const refundQueue = require('../config/queues').refundQueue;
+      await refundQueue.add(
+        {
+          bookingId,
+          reason: reason || 'Customer-initiated cancellation',
+          requestedByUserId,
+        },
+        {
+          jobId: `refund-${bookingId}`,
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 2000 },
+        }
+      );
+      logger.info('[dbService] Refund job queued', { bookingId, reason });
+    }
+
+    // ── 6. Audit the cancellation ────────────────────────────────────────────
+    await AuditService.logInTransaction(client, {
+      action:     AuditService.ACTIONS.BOOKING_CANCELLED,
+      entityType: 'booking',
+      entityId:   bookingId,
+      userId:     requestedByUserId,
+      beforeData: { status: booking.status, groupSize: booking.group_size },
+      afterData:  { status: 'cancelled' },
+      metadata:   { reason },
+    });
+
+    logger.info('[dbService] Booking cancelled', {
+      bookingId,
+      tripId: booking.trip_id,
+      groupSize: booking.group_size,
+      reason,
+      requestedByUserId,
+    });
+
+    return cancelledBooking.rows[0];
+  });
+}
+
+module.exports = {
+  cancelBooking,
+  // ... other exports ...
+};

@@ -1,0 +1,16 @@
+# Node.js backend project
+node_modules/
+.env*
+!.env.example
+logs/
+*.log
+.nyc_output/
+coverage/
+dist/
+.DS_Store
+pm2/
+Docker secrets
+secrets/
+
+config/env.js     # Block if it has hardcoded secrets (check first)
+
