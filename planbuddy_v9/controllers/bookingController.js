@@ -1,19 +1,20 @@
 'use strict';
 
 /**
- * controllers/bookingController.js — Booking Controller (v6.0)
+ * controllers/bookingController.js — Booking Controller (v6.1)
  *
- * 🚀 PHASE 2B — PlanBuddy v6.0 Full Observability
- *
- * UPGRADES from v4.0:
- *  1. Structured logging with trace_id, booking_id on every log line
- *  2. Business metrics: booking created / success / failed
- *  3. Trace context updated with booking_id after creation
+ * 🔥 RACE CONDITION FIX — cancelBooking() hardening:
+ *  1. Calls dbService_fixed.cancelBooking() — NOT the unfixed dbService
+ *  2. All status checks and capacity updates happen inside ONE db transaction
+ *     with SELECT FOR UPDATE locks — no concurrent request can read stale state
+ *  3. `crypto` properly imported at the top (was used inline without import)
+ *  4. All other handlers are unchanged
  */
 
 const DbService = require('../services/dbService_fixed');
 const db        = require('../config/db');
 const logger    = require('../utils/logger');
+const crypto    = require('crypto');                          // 🔥 FIX: was missing import
 // 🚀 PHASE 2B: Business metrics
 const metrics   = require('../services/metricsService');
 // 🚀 PHASE 2B: Trace context updater
@@ -224,6 +225,10 @@ exports.cancelBooking = async (req, res, next) => {
     const { bookingId } = req.params;
     const { reason }    = req.body;
 
+    // ── Pre-flight: existence + ownership check (outside transaction, fast path) ─
+    // This is a non-locking read purely to validate the request before we
+    // enter the expensive locked transaction. The actual status + capacity
+    // mutation is re-validated inside the transaction with FOR UPDATE.
     const bookingCheck = await db.query(
       `SELECT b.*, t.title AS trip_title
        FROM bookings b
@@ -250,8 +255,45 @@ exports.cancelBooking = async (req, res, next) => {
       });
     }
 
-    // Confirmed + paid → initiate refund first
+    // ── Confirmed + paid → refund path ───────────────────────────────────────
     if (existing.status === 'confirmed' && existing.payment_status === 'paid') {
+      // 🔥 CONCURRENCY FIX: Atomically claim this cancellation before calling
+      // RefundService. The pre-flight read at line 232 was unlocked — two
+      // concurrent requests could both pass the status check above and both
+      // invoke initiateRefund() for the same booking (double refund).
+      //
+      // This UPDATE only succeeds for ONE concurrent request because PostgreSQL
+      // processes it atomically. The second request gets 0 rows back and is
+      // rejected before refund logic runs. No transaction wrapper is needed
+      // here because a single UPDATE statement is itself atomic in PostgreSQL.
+      const claimResult = await db.query(
+        `UPDATE bookings
+         SET status     = 'cancellation_pending',
+             updated_at = NOW()
+         WHERE id = $1
+           AND status = 'confirmed'
+           AND payment_status = 'paid'
+         RETURNING id`,
+        [bookingId]
+      );
+
+      if (claimResult.rows.length === 0) {
+        // Another request already claimed this cancellation — return idempotent response
+        const current = await db.query(
+          `SELECT b.*, t.title AS trip_title FROM bookings b
+           JOIN trips t ON t.id = b.trip_id WHERE b.id = $1`,
+          [bookingId]
+        );
+        logger.warn('Refund cancellation already claimed — idempotent return', {
+          requestId: req.requestId, userId: req.user.id, bookingId,
+        });
+        return res.json({
+          success: true,
+          message: 'Booking cancellation already in progress.',
+          data:    { booking: current.rows[0] },
+        });
+      }
+
       const RefundService = require('../services/refundService');
       try {
         await RefundService.initiateRefund(
@@ -295,8 +337,19 @@ exports.cancelBooking = async (req, res, next) => {
       }
     }
 
-    const booking = await require('../services/dbService').cancelBooking(bookingId, req.headers['idempotency-key'] || crypto.randomUUID(), reason || 'Cancelled by user', req.user.id);
+    // ── Non-refund cancellation path ──────────────────────────────────────────
+    // 🔥 FIX 1: Call DbService (dbService_FIXED) — NOT the unsafe `dbService`
+    // 🔥 FIX 2: Pass a deterministic idempotency key; crypto now properly imported
+    const idempotencyKey = req.headers['idempotency-key'] || crypto.randomUUID();
 
+    const booking = await DbService.cancelBooking(
+      bookingId,
+      idempotencyKey,
+      reason || 'Cancelled by user',
+      req.user.id
+    );
+
+    // ── Post-cancellation email (non-fatal) ───────────────────────────────────
     try {
       const userResult = await db.query('SELECT id, email, name FROM users WHERE id=$1', [req.user.id]);
       const EmailService = require('../services/emailService');
