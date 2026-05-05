@@ -34,12 +34,15 @@ RUN mkdir -p /app/logs && chown planbuddy:planbuddy /app/logs
 # Don't run as root
 USER planbuddy
 
+# Make start.sh executable
+RUN chmod +x start.sh
+
 # Expose port
 EXPOSE 3000
 
-# Healthcheck
-HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-  CMD node scripts/healthcheck.js
+# Healthcheck - DB + Redis
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD node scripts/healthcheck.js
 
-# Default start command
-CMD ["node", "server.js"]
+# Production startup: migrations then server
+CMD ["./start.sh"]
+

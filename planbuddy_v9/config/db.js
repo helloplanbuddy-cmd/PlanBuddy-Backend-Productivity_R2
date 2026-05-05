@@ -1,13 +1,24 @@
 'use strict';
 
 /**
- * config/db.js — Production-Grade PostgreSQL Pool (v3.0)
+ * config/db.js — Production-Grade PostgreSQL Pool (v4.0)
  *
- * UPGRADES from v2.0:
+ * UPGRADES from v3.0:
+ *  8. PM2 cluster-safety guard at startup.
+ *     In PM2 cluster mode every worker process creates its own pg Pool, so the
+ *     total number of connections PostgreSQL will see is:
+ *
+ *       DB_POOL_MAX  ×  PM2_INSTANCES
+ *
+ *     If that exceeds PostgreSQL's max_connections the server will refuse new
+ *     connections under load, causing runtime errors and cascading failures.
+ *     The constructor now validates this before the pool is created and calls
+ *     process.exit(1) with a clear diagnostic message if the values are unsafe.
+ *
+ * Previous upgrades (v3.0):
  *  1. All config sourced from config/env.js — zero raw process.env access.
  *  2. Pool tuning values are configurable via env vars (DB_POOL_MAX, etc.).
- *  3. Admin-path query helper with per-query statement_timeout override
- *     (fixes RISK: global 30s timeout silently killing long admin queries).
+ *  3. Admin-path query helper with per-query statement_timeout override.
  *  4. Pool telemetry: idle/total/waiting counts exported for Prometheus.
  *  5. Structured Pino logger (no more console.error on pool errors).
  *  6. transaction() and transactionRR() accept an optional label for tracing.
@@ -19,6 +30,92 @@ const env      = require('./env');
 
 const MAX_RETRIES = 3;
 const BASE_DELAY  = 50; // ms
+
+// ─── PM2 Cluster Pool-Safety Guard ───────────────────────────────────────────
+//
+// PROBLEM
+//   PM2 cluster mode forks N identical Node.js worker processes.
+//   Each worker independently creates a pg.Pool with DB_POOL_MAX connections.
+//   Total connections PostgreSQL must serve = DB_POOL_MAX × PM2_INSTANCES.
+//
+//   If this exceeds PostgreSQL's max_connections the server rejects new
+//   connections, producing "sorry, too many clients already" errors under load.
+//
+// FORMULA
+//   totalConnections = DB_POOL_MAX × PM2_INSTANCES
+//   maxAllowed       = DB_MAX_CONNECTIONS × 0.8   ← 20 % headroom for:
+//                                                       • superuser/admin connections
+//                                                       • pg_bouncer or other tools
+//                                                       • background autovacuum workers
+//                                                       • replication slots
+//   GUARD: totalConnections ≤ maxAllowed
+//
+// HOW TO FIX when the guard fails
+//   Option A — lower DB_POOL_MAX:
+//     DB_POOL_MAX = floor((DB_MAX_CONNECTIONS × 0.8) / PM2_INSTANCES)
+//   Option B — reduce PM2_INSTANCES in ecosystem.config.js
+//   Option C — raise DB_MAX_CONNECTIONS on the PostgreSQL server
+//              (edit postgresql.conf: max_connections = N, then restart PG)
+//
+// EXAMPLE SAFE VALUES (DB_MAX_CONNECTIONS = 100 → maxAllowed = 80)
+//   PM2_INSTANCES=2  → DB_POOL_MAX ≤ 40
+//   PM2_INSTANCES=4  → DB_POOL_MAX ≤ 20
+//   PM2_INSTANCES=8  → DB_POOL_MAX ≤ 10
+//
+// ──────────────────────────────────────────────────────────────────────────────
+
+function validateClusterPoolSafety() {
+  const poolMax    = env.DB_POOL_MAX;
+  const instances  = env.PM2_INSTANCES;
+  const pgMax      = env.DB_MAX_CONNECTIONS;
+
+  const total      = poolMax * instances;
+  const maxAllowed = Math.floor(pgMax * 0.8);
+
+  // Always log the computed values so operators can verify sizing at startup.
+  console.info(
+    `[db] Pool sizing: DB_POOL_MAX=${poolMax} × PM2_INSTANCES=${instances}` +
+    ` = ${total} total connections` +
+    ` (PG max_connections=${pgMax}, 80% limit=${maxAllowed})`
+  );
+
+  if (total > maxAllowed) {
+    // Print a self-contained diagnostic — operators should be able to act on
+    // this message alone without reading source code.
+    console.error('');
+    console.error('[db] FATAL: DB connection pool configuration is unsafe for PM2 cluster mode.');
+    console.error('');
+    console.error(`  DB_POOL_MAX   = ${poolMax}`);
+    console.error(`  PM2_INSTANCES = ${instances}`);
+    console.error(`  Total conns   = ${total}  ← this will be opened against PostgreSQL`);
+    console.error(`  PG max_conns  = ${pgMax}`);
+    console.error(`  80% limit     = ${maxAllowed}  ← must not exceed this`);
+    console.error('');
+    console.error('  HOW TO FIX (choose one):');
+    console.error(`    A) Lower DB_POOL_MAX to ${Math.floor(maxAllowed / instances)} or less`);
+    console.error(`    B) Reduce PM2_INSTANCES in ecosystem.config.js`);
+    console.error(`    C) Raise max_connections in postgresql.conf and restart PostgreSQL`);
+    console.error('');
+    console.error('  If using Supabase, check your plan\'s connection limit:');
+    console.error('    Free: 60  |  Pro: 200  |  Team/Enterprise: higher');
+    console.error('');
+    process.exit(1);
+  }
+
+  // Soft warning: total is safe but above 60 % — flag for ops review.
+  if (total > pgMax * 0.6) {
+    console.warn(
+      `[db] WARNING: ${total} connections is above 60% of PG max (${pgMax}). ` +
+      'Consider reducing DB_POOL_MAX or PM2_INSTANCES before adding more workers.'
+    );
+  }
+}
+
+// Run immediately — before the pool is created so we fail before any TCP
+// connections are attempted.
+validateClusterPoolSafety();
+
+// ─── Database class ───────────────────────────────────────────────────────────
 
 class Database {
   constructor() {
@@ -96,18 +193,16 @@ class Database {
     return this._runTransaction(callback, 'REPEATABLE READ', label);
   }
 
-// ─── Internal: run callback in a transaction, retry on serialization fail ───
+  // ─── Internal: run callback in a transaction, retry on serialization fail ───
   async _runTransaction(callback, isolationLevel, label) {
     const logger = require('../utils/logger');
     let attempt  = 0;
-    const stmtTimeout = env.DB_STATEMENT_TIMEOUT_MS || 5000; // 🔥 PHASE 3: Enforce per-transaction
+    const stmtTimeout = env.DB_STATEMENT_TIMEOUT_MS || 5000;
 
     while (true) {
       attempt++;
       const client = await this._pool.connect();
       try {
-        // 🔥 PHASE 3: Set statement timeout per transaction (not just pool-level)
-        // 🔥 PHASE 4.1: Also set idle_in_transaction timeout
         await client.query(`SET LOCAL statement_timeout = ${stmtTimeout}`);
         await client.query(`SET LOCAL idle_in_transaction_session_timeout = ${stmtTimeout * 2}`);
         await client.query(`BEGIN ISOLATION LEVEL ${isolationLevel}`);

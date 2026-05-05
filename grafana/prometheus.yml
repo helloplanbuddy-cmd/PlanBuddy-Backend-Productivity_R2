@@ -11,9 +11,10 @@ scrape_configs:
     scrape_interval: 10s
     static_configs:
       - targets: ['api:3000']  # Links to docker-compose.yml 'api' service
-    # Labels for queries
-    labelmap:
-      job: 'planbuddy-api'
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: job
+        replacement: planbuddy-api
 
   - job_name: 'planbuddy-postgres'
     metrics_path: '/metrics'

@@ -1,13 +1,8 @@
-version: '3.9'
-
 services:
   api:
+    build: ./planbuddy_v9
     ports:
       - "3000:3000"
-    networks:
-      - planbuddy_net
-
-  workers:
     networks:
       - planbuddy_net
 

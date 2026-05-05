@@ -54,3 +54,49 @@ groups:
           summary: "Alert storm detected"
           description: ">20 critical alerts/hour"
 
+      - alert: DataIntegrityMismatch
+        expr: integrity_mismatches > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Data integrity violation ({{ $value }} mismatches)"
+          description: "Integrity mismatches >0 for 1min. Check /internal/health/production"
+
+      - alert: DLQJobsHighWarning
+        expr: dlq_jobs_active > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DLQ growing ({{ $value }} jobs)"
+          description: "dead_letter_jobs >5 for 5min"
+
+      - alert: DLQJobsCritical
+        expr: dlq_jobs_active > 20
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "DLQ critical ({{ $value }} jobs, oldest {{ $labels.age }}s)"
+          description: "dead_letter_jobs >20 for 2min"
+
+      - alert: ReconciliationLag
+        expr: increase(reconciliation_orphans[5m]) > 10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Reconciliation orphans increasing ({{ $value }}/5m)"
+          description: "Orphaned payments growing. Check reconciliation worker"
+
+      - alert: DLQStale
+        expr: dlq_oldest_age_seconds > 3600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Stale DLQ job ({{ $value }}s old)"
+          description: "Oldest dead_letter_job >1hr old for 10min"
+
+
