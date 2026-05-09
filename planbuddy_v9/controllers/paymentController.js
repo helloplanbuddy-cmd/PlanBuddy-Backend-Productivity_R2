@@ -316,7 +316,20 @@ exports.razorpayWebhook = async (req, res, next) => {
   const body = req.body;
   const eventId = body.razorpay_event_id || body.razorpay_payment_id; // fallback
 
-  try {
+    try {
+    // Fintech: Webhook retry storm detector
+    const redis = require('../config/redis.js').redis;
+    const paymentId = req.body.razorpay_payment_id;
+    if (paymentId) {
+      const retryKey = `webhook_retry:${paymentId}`;
+      const retries = await redis.incr(retryKey);
+      if (retries === 1) await redis.expire(retryKey, 300);
+      if (retries > 3) {
+        const { alertSystemOverload } = require('../services/alertingService.js');
+        await alertSystemOverload('webhook_retries', retries, 3);
+        monitoring.webhook_retry_storm_total?.inc();
+      }
+    }
     // Sig verify
     RazorpayService.verifySignature(`${body.razorpay_order_id}|${body.razorpay_payment_id}`, signature);
 
@@ -339,9 +352,41 @@ exports.razorpayWebhook = async (req, res, next) => {
   } catch (err) {
     if (err.code === '23505') { // UNIQUE violation - idempotent OK
       res.status(200).json({ success: true, idempotent: true });
+    if (err.status === 404 || err.status === 409) {
+      return res.status(200).json({
+        success: false,
+        code:    err.code || 'WEBHOOK_ERROR',
+        message: err.message,
+      });
+    }
+    next(err);
+>>>>>>> 775e8c9373ca4f5195cdcd48597a11eac9b519a5
+  }
+};
+=======
     } else {
       next(err);
     }
+    if (err.status === 404 || err.status === 409) {
+      return res.status(200).json({
+        success: false,
+        code:    err.code || 'WEBHOOK_ERROR',
+        message: err.message,
+      });
+    }
+    next(err);
+  }
+};
+=======
+    if (err.status === 404 || err.status === 409) {
+      return res.status(200).json({
+        success: false,
+        code:    err.code || 'WEBHOOK_ERROR',
+        message: err.message,
+      });
+    }
+    next(err);
+>>>>>>> 775e8c9373ca4f5195cdcd48597a11eac9b539a5
   }
 };
 
