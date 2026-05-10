@@ -14,6 +14,7 @@
  *  - Both clients are singletons — one connection per process, pooling handled by ioredis.
  *  - Connection errors are logged but never crash the process (fail-open on cache miss).
  *  - `isHealthy()` exposes a PING check for the /health/ready endpoint.
+ *  - `isQueueHealthy()` exposes a PING check for the BullMQ queue client.
  *  - TLS is auto-detected from URL scheme (rediss://).
  *  - Reconnect strategy: exponential backoff capped at 30s.
  */
@@ -35,10 +36,15 @@ function createClient(url, name) {
 
   const opts = {
     // ioredis parses the URL — TLS auto-enabled for rediss://
-    lazyConnect:     false,
-    maxRetriesPerRequest: null, // required by BullMQ — don't suppress connection errors
+    lazyConnect: false,
+
+    // required by BullMQ — don't suppress connection errors
+    maxRetriesPerRequest: null,
+
     enableReadyCheck: true,
-    retryStrategy:   reconnectStrategy,
+
+    retryStrategy: reconnectStrategy,
+
     reconnectOnError(err) {
       // Reconnect on READONLY errors (Redis Cluster failover)
       return err.message.includes('READONLY');
@@ -73,30 +79,77 @@ function createClient(url, name) {
 
 // ─── Singleton instances ──────────────────────────────────────────────────────
 
-const redis      = createClient(env.REDIS_URL,       'cache');
-const redisQueue = createClient(env.REDIS_QUEUE_URL, 'queue');
+const redis = createClient(env.REDIS_URL, 'cache');
+
+const redisQueue = createClient(
+  env.REDIS_QUEUE_URL,
+  'queue'
+);
 
 // ─── Health probe ─────────────────────────────────────────────────────────────
 
 /**
  * PING the Redis cache client.
- * Returns { status: 'ok', latencyMs } or { status: 'error', error }.
+ * Returns:
+ *   { status: 'ok', latencyMs }
+ * or
+ *   { status: 'error', error, latencyMs }
  */
 async function isHealthy() {
   const start = Date.now();
+
   try {
     const pong = await redis.ping();
-    if (pong !== 'PONG') throw new Error(`Unexpected PING response: ${pong}`);
-    return { status: 'ok', latencyMs: Date.now() - start };
+
+    if (pong !== 'PONG') {
+      throw new Error(`Unexpected PING response: ${pong}`);
+    }
+
+    return {
+      status: 'ok',
+      latencyMs: Date.now() - start,
+    };
   } catch (err) {
-    return { status: 'error', error: err.message, latencyMs: Date.now() - start };
+    return {
+      status: 'error',
+      error: err.message,
+      latencyMs: Date.now() - start,
+    };
+  }
+}
+
+/**
+ * PING the Redis queue client.
+ * Used for BullMQ / worker health validation.
+ */
+async function isQueueHealthy() {
+  const start = Date.now();
+
+  try {
+    const pong = await redisQueue.ping();
+
+    if (pong !== 'PONG') {
+      throw new Error(`Unexpected PING response: ${pong}`);
+    }
+
+    return {
+      status: 'ok',
+      latencyMs: Date.now() - start,
+    };
+  } catch (err) {
+    return {
+      status: 'error',
+      error: err.message,
+      latencyMs: Date.now() - start,
+    };
   }
 }
 
 // ─── Graceful disconnect ──────────────────────────────────────────────────────
 
 /**
- * Called during server shutdown. Closes both clients cleanly.
+ * Called during server shutdown.
+ * Closes both clients cleanly.
  */
 async function disconnect() {
   await Promise.allSettled([
@@ -105,4 +158,12 @@ async function disconnect() {
   ]);
 }
 
-module.exports = { redis, redisQueue, isHealthy, disconnect };
+// ─── Exports ──────────────────────────────────────────────────────────────────
+
+module.exports = {
+  redis,
+  redisQueue,
+  isHealthy,
+  isQueueHealthy,
+  disconnect,
+};
