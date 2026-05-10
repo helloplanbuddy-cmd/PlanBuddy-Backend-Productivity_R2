@@ -4,7 +4,14 @@
   "scripts": {
     "start": "node app.js",
     "dev": "nodemon app.js",
-    "test": "jest --verbose"
+    "test": "jest --verbose",
+    "test:financial": "jest --verbose --testPathPattern=financial-idempotency",
+    "test:concurrency": "jest --verbose --testPathPattern=concurrency",
+    "workers": "node workers/index.js",
+    "worker:webhook": "node workers/start-webhook.js",
+    "worker:refund": "node workers/start-refund.js",
+    "worker:email": "node workers/start-email.js",
+    "worker:scheduler": "node workers/start-scheduler.js"
   },
   "dependencies": {
     "bullmq": "^5.76.5",
