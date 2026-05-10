@@ -3,7 +3,6 @@
 const express = require('express');
 const router = express.Router();
 const healthController = require('../controllers/healthController');
-const productionHealth = require('../services/productionHealth');
 
 /**
  * Internal observability routes (/internal/*)
@@ -11,15 +10,30 @@ const productionHealth = require('../services/productionHealth');
  */
 
 // Health endpoints
-router.get('/health/ready',     healthController.ready);
-router.get('/health/readiness', healthController.readiness);
-router.get('/health/detailed',  healthController.detailed);
+router.get('/health/ready',      healthController.ready);
+router.get('/health/readiness',  healthController.readiness);
+router.get('/health/detailed',   healthController.detailed);
 router.get('/health/production', healthController.production);
 
-// Trigger manual integrity check (debug only)
+// Optional integrity endpoint
 router.post('/health/check-integrity', async (req, res) => {
-  await productionHealth.checkIntegrity();
-  res.json({ status: 'check triggered' });
+  try {
+    if (typeof healthController.checkIntegrity === 'function') {
+      await healthController.checkIntegrity();
+
+      return res.json({
+        status: 'check triggered'
+      });
+    }
+
+    return res.status(501).json({
+      error: 'Integrity check not implemented'
+    });
+  } catch (err) {
+    return res.status(500).json({
+      error: err.message
+    });
+  }
 });
 
 module.exports = router;
