@@ -158,7 +158,8 @@ exports.createOrder = async (req, res, next) => {
       metadata: { order_id: order.id, amount_paise: amountPaise },
     });
 
-    metrics.recordPaymentAttempted();
+    // Record payment initiated in metrics (auditability)
+    metrics.payment_initiated_total.inc();
     updateTraceContext({ booking_id: bookingId });
 
     return res.json({
@@ -172,7 +173,8 @@ exports.createOrder = async (req, res, next) => {
       },
     });
   } catch (err) {
-    monitoring.payment_failures_total?.inc({ reason: 'order_creation_failed' });
+    // Record payment failure for observability (safe call, never throws)
+    metrics.safeMetricCall('payment_failed_total', 'inc', { reason: 'order_creation_failed' });
     next(err);
   }
 };
@@ -230,7 +232,7 @@ exports.verifyPayment = async (req, res, next) => {
       data: result.data,
     });
   } catch (err) {
-    monitoring.payment_failures_total?.inc({ reason: err.message?.slice(0, 50) || 'unknown' });
+    metrics.safeMetricCall('payment_failed_total', 'inc', { reason: err.message?.slice(0, 50) || 'unknown' });
     next(err);
   }
 };

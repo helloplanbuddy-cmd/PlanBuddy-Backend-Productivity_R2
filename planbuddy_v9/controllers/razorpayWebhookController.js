@@ -427,8 +427,10 @@ exports.handleRazorpayWebhook = async (req, res) => {
       logger.error({ requestId }, '[webhook][razorpay] 🔴 SECURITY: Signature verification FAILED - POSSIBLE ATTACK');
       try {
         const metrics = require('../services/metricsService');
-        metrics.incrementCounter('webhook_signature_failures_total', { provider: 'razorpay' });
-      } catch (e) {}
+        metrics.webhook_received_total.inc({ event_type: 'webhook_event', status: 'invalid_signature' });
+      } catch (e) {
+        logger.warn({ requestId, err: e.message }, '[webhook][razorpay] Failed to record webhook metric');
+      }
 
       return res.status(403).json({
         success: false,
@@ -462,6 +464,8 @@ exports.handleRazorpayWebhook = async (req, res) => {
     const provider = 'razorpay';
     const type = extractEventType(payload);
 
+    let leaseVersion = null;
+
     await db.transaction(async (client) => {
       const inserted = await insertWebhookEvent(client, {
         eventId: String(eventId),
@@ -473,13 +477,26 @@ exports.handleRazorpayWebhook = async (req, res) => {
       if (!inserted) {
         logger.info({ requestId, eventId }, '[webhook][razorpay] Duplicate event already persisted');
       }
+
+      // 🔒 STEP 2.1: Retrieve leaseVersion (fencing identity) at queue time
+      // This ensures the job carries proof of which version it should process
+      const versionRes = await client.query(
+        `SELECT lease_version FROM webhook_events WHERE event_id = $1`,
+        [String(eventId)]
+      );
+      leaseVersion = versionRes.rows[0]?.lease_version;
+
+      if (leaseVersion === null || leaseVersion === undefined) {
+        throw new Error('[FATAL] Failed to retrieve leaseVersion for webhook event');
+      }
     }, 'webhook_ingest');
 
-    const { webhookQueue } = require('../config/queues');
+    const { webhookEventsQueue } = require('../config/queues');
 
     try {
-      await webhookQueue.add('process-webhook', {
+      await webhookEventsQueue.add('process-webhook', {
         eventId: String(eventId),
+        leaseVersion,
         provider,
         eventType: type,
         payload,

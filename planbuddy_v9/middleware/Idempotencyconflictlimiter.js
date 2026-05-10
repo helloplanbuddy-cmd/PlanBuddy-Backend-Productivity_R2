@@ -44,7 +44,7 @@
  */
 
 const logger     = require('../utils/logger');
-const monitoring = require('../utils/monitoring');
+const metrics    = require('../services/metricsService');
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -106,8 +106,8 @@ async function trackConflict(ip, redis) {
         blockSec: BLOCK_S,
       });
 
-      // Fire Prometheus metric (best-effort).
-      monitoring.security_alerts_total?.inc({ type: 'idempotency_abuse' });
+      // Record security alert (safe call — never throws).
+      metrics.safeMetricCall('security_alerts_total', 'inc', { type: 'idempotency_abuse' });
 
       // Fire alerting service (best-effort — never throw).
       try {
@@ -177,7 +177,7 @@ function conflictLimiter() {
           method: req.method,
         });
 
-        monitoring.security_alerts_total?.inc({ type: 'idempotency_blocked_ip' });
+        metrics.safeMetricCall('security_alerts_total', 'inc', { type: 'idempotency_blocked_ip' });
 
         return res.status(429).json({
           success:    false,

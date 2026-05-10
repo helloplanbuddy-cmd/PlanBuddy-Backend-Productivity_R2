@@ -225,6 +225,17 @@ app.use((req, res) => {
 // ─── Centralised error handler (MUST be last middleware) ──────────────────────
 app.use(errorHandler);
 
+// ─── STARTUP VALIDATION: Metrics correctness ─────────────────────────────────
+// This must happen BEFORE server starts listening
+// Failures here are catastrophic and should halt startup
+try {
+  const metricsService = require('./services/metricsService');
+  metricsService.validateMetrics();
+} catch (metricsErr) {
+  logger.error({ err: metricsErr.message }, '[boot] 🔴 CRITICAL: Metrics validation failed — cannot start');
+  throw metricsErr;
+}
+
 const port = process.env.PORT || 3000;
 const server = app.listen(port, () => console.log(`Server running on port ${port}`));
 

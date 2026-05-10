@@ -24,7 +24,7 @@
  */
 
 const logger = require('../utils/logger');
-const monitoring = require('../utils/monitoring');
+const metrics = require('../planbuddy_v9/services/metricsService');
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -248,9 +248,7 @@ function backpressure(options = {}) {
 
     try {
       if (isOverloaded()) {
-        if (monitoring.backpressure_total) {
-          monitoring.backpressure_total.inc();
-        }
+        metrics.safeMetricCall('backpressure_total', 'inc');
 
         logger.warn('BACKPRESSURE: Request rejected — system overloaded', {
           path:           req.path,
@@ -294,9 +292,7 @@ function bookingBackpressure() {
     const bookingRequests = activeRequests;
 
     if (bookingRequests >= BOOKING_MAX) {
-      if (monitoring.backpressure_total) {
-        monitoring.backpressure_total.inc({ endpoint: 'booking' });
-      }
+      metrics.safeMetricCall('backpressure_total', 'inc', { endpoint: 'booking' });
 
       logger.warn('BACKPRESSURE: Booking request rejected', {
         activeRequests: bookingRequests,

@@ -18,7 +18,7 @@
 
 const { ZodError }   = require('zod');
 const logger         = require('../utils/logger');
-const monitoring     = require('../utils/monitoring');
+const metrics        = require('../services/metricsService');
 const env            = require('../config/env');
 
 // ─── AppError — typed operational errors ─────────────────────────────────────
@@ -150,9 +150,9 @@ const errorHandler = (err, req, res, next) => {
     logger.warn(logPayload, `[error] ${message}`);
   }
 
-  // ── Prometheus: payment failures counter ─────────────────────────────────
+  // ── Observability: payment failures counter ───────────────────────────────
   if (status >= 500 && req.path.includes('/payment')) {
-    monitoring.payment_failures_total.inc({ reason: code || 'unknown' });
+    metrics.safeMetricCall('payment_failed_total', 'inc', { reason: code || 'unknown' });
   }
 
   // ── HTTP response ────────────────────────────────────────────────────────

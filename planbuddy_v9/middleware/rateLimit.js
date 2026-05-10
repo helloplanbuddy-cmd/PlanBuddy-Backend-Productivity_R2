@@ -21,7 +21,7 @@
 
 const rateLimit = require('express-rate-limit');
 const logger    = require('../utils/logger');
-const monitoring = require('../utils/monitoring');
+const metrics   = require('../services/metricsService');
 
 // ─── Redis store adapter ──────────────────────────────────────────────────────
 
@@ -44,8 +44,8 @@ logger.error('RATE_LIMIT_BYPASS',
       'Rate limiter falling back to MemoryStore — brute-force attacks possible', {
       service: 'rateLimit',
     });
-    // Alert metric (if available)
-    monitoring.security_alerts_total?.inc({ type: 'rate_limit_bypass' });
+    // Alert metric (safe call — never throws)
+    metrics.safeMetricCall('security_alerts_total', 'inc', { type: 'rate_limit_bypass' });
     return undefined; // falls back to express-rate-limit's default MemoryStore
   }
 }
@@ -82,7 +82,7 @@ function makeLimiter({ name, windowMs, max, keyGenerator = ipKey }) {
     store:           makeRedisStore(`rl:${name}:`),
     handler(req, res) {
       onLimitReached(req, res, { name });
-      monitoring.request_total.inc({ method: req.method, path: 'rate_limited' });
+      // Rate limit rejection already logged in onLimitReached
       res.status(429).json({
         success: false,
         message: 'Too many requests. Please try again later.',
