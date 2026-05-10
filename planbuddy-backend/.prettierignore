@@ -1,0 +1,19 @@
+# IDE - VSCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# Ignore codegen generated files
+/**/generated/*.ts
+*.generated.ts
+
+# ignore seed data
+services/mongo-seed/*
+
+# jest files
+/**/coverage/**
+
+# build files
+/**/dist/**
