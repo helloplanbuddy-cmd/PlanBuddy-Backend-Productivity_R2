@@ -3,11 +3,11 @@
 const express = require('express');
 const router = express.Router();
 const healthController = require('../controllers/healthController');
-// const productionHealth = require('../../services/productionHealth');
+const productionHealth = require('../services/productionHealth');
 
 /**
  * Internal observability routes (/internal/*)
- * No auth — IP restricted via app.js + prometheus IP guard.
+ * Access is restricted at the app layer via an IP allowlist.
  */
 
 // Health endpoints
@@ -23,4 +23,3 @@ router.post('/health/check-integrity', async (req, res) => {
 });
 
 module.exports = router;
-

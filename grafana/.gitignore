@@ -1,0 +1,40 @@
+# Node
+node_modules/
+npm-debug.log
+
+# Env
+.env
+.env.*
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build / temp
+dist/
+build/
+.tmp/
+.cache/
+
+# Docker
+*.pid
+
+# Diagnostics (VERY IMPORTANT — your load test junk)
+diagnostics/
+
+# VSCode
+.vscode/
+
+# Root duplicates (ignore junk outside planbuddy_v9/)
+services/
+workers/
+tests/
+load-test*.js
+fixed*.sql
+
+# Misc
+coverage/

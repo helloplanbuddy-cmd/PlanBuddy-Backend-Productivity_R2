@@ -182,9 +182,21 @@ app.use('/api/v1', apiVersion('v1'), routes);
 // ─── API Routes — legacy (backward compat) ───────────────────────────────────
 app.use('/api', apiVersion('legacy'), routes);
 
-// 🚀 PHASE 2B: Internal observability routes (metrics + failed-jobs)
-// NOT under /api/v1 — internal-only, IP-guarded or admin-JWT-guarded
-app.use('/internal', internalRoutes);
+/**
+ * Internal observability routes (/internal/*)
+ * HARDENED: deny-by-default unless caller IP is explicitly allowlisted.
+ * (This is critical because internal routes must not rely on comments / router-local assumptions.)
+ */
+app.use('/internal', (req, res, next) => {
+  const clientIp = req.ip || req.socket.remoteAddress;
+
+  if (!env.METRICS_ALLOWED_IPS.includes(clientIp)) {
+    logger.warn({ clientIp, requestId: req.requestId }, '[internal] Access denied');
+    return res.status(403).end('Forbidden');
+  }
+
+  return internalRoutes(req, res, next);
+});
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {

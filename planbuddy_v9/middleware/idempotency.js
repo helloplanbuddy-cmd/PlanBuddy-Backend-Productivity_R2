@@ -263,24 +263,19 @@ async function runIdempotency(req, res, next, rawKey) {
     .update(JSON.stringify(req.body || {}))
     .digest('hex');
 
-  // ── Step 4: Intercept res.json to capture and cache the response ─────────────
-  //
-  // We wrap res.json rather than use a response-finished event so we can
-  // await the cache/DB writes before the response bytes are sent, ensuring
-  // the key is stored before the client can retry.
+// ── Step 4: Intercept res.json/res.send to capture and cache the response ─
+// We wrap res.json and res.send (common Express patterns) rather than
+// a response-finished event so we can await cache/DB writes before bytes
+// are sent, ensuring the key is stored before the client retries.
 
   const originalJson = res.json.bind(res);
+  const originalSend = res.send.bind(res);
 
-  res.json = async function captureIdempotentResponse(body) {
-    // Restore immediately so recursive calls to res.json don't re-trigger this.
-    res.json = originalJson;
-
+  async function captureAndCacheResponse(body) {
     const status = res.statusCode || 200;
 
     try {
       // Only cache successful (2xx) responses.
-      // Error responses (4xx/5xx) must not be replayed — the client should
-      // be able to correct the request and try again.
       if (status >= 200 && status < 300) {
         const payload = JSON.stringify({ status, body });
 
@@ -293,19 +288,62 @@ async function runIdempotency(req, res, next, rawKey) {
           }
         }
 
-        // Write to DB (durable fallback — always, not only when Redis is down).
-        // This ensures the response survives a Redis restart or cluster failover.
-        await dbSet(dbKey, userId, endpoint, requestHash, status, JSON.stringify(body));
+        // Write to DB (durable fallback — always).
+        await dbSet(
+          dbKey,
+          userId,
+          endpoint,
+          requestHash,
+          status,
+          typeof body === 'string' ? JSON.stringify({ value: body }) : JSON.stringify(body)
+        );
       }
     } finally {
-      // Always release the lock — even if caching fails or throws.
-      // Placed in finally so a cache write error never creates a zombie lock.
+      // Always release the lock.
       if (lockAcquired) {
         await releaseLock(redis, lockKey);
       }
     }
+  }
 
+  // Capture JSON
+  res.json = async function captureIdempotentJsonResponse(body) {
+    // Restore immediately to avoid recursion
+    res.json = originalJson;
+    res.send = originalSend;
+
+    await captureAndCacheResponse(body);
     return originalJson(body);
+  };
+
+  // Capture send() for JSON payloads
+  res.send = async function captureIdempotentSendResponse(body) {
+    // Restore immediately to avoid recursion
+    res.json = originalJson;
+    res.send = originalSend;
+
+    // If Express is sending a Buffer/string, we only safely cache JSON-like content.
+    // If it's a plain object, cache it.
+    const shouldCache =
+      body && typeof body === 'object' && !Buffer.isBuffer(body) ||
+      typeof body === 'string';
+
+    if (shouldCache) {
+      // Try to normalize strings that are JSON
+      let normalized = body;
+      if (typeof body === 'string') {
+        try {
+          normalized = JSON.parse(body);
+        } catch (_) {
+          // Non-JSON string: do not attempt to replay as JSON body.
+          normalized = { value: body };
+        }
+      }
+
+      await captureAndCacheResponse(normalized);
+    }
+
+    return originalSend(body);
   };
 
   return next();

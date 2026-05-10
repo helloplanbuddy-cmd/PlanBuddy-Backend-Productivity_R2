@@ -97,6 +97,19 @@ const refundRetryQueue = new Queue('refund-retry', {
   },
 });
 
+/**
+ * webhook-events — event-driven
+ * Razorpay webhook processing queue consumed by workers/webhook-processor.worker.js
+ */
+const webhookEventsQueue = new Queue('webhook-events', {
+  connection,
+  defaultJobOptions: {
+    ...DEFAULT_JOB_OPTIONS,
+    attempts: 5,
+    backoff:  { type: 'exponential', delay: 1_000 },
+  },
+});
+
 // ─── Scheduler: set up repeating jobs ────────────────────────────────────────
 
 async function scheduleRepeatableJobs() {
@@ -197,8 +210,10 @@ module.exports = {
   bookingExpiryQueue,
   reconciliationQueue,
   emailQueue,
-  refundRetryQueue,
+    refundRetryQueue,
+  webhookEventsQueue,
   scheduleRepeatableJobs,
+
   closeQueues,
   enqueueEmail,
   enqueueRefundRetry,

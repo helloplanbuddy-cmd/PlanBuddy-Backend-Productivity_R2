@@ -27,6 +27,7 @@
 
 const { Pool } = require('pg');
 const env      = require('./env');
+const { guardFinancialWrite } = require('../guards/financialWriteGuard');
 
 const MAX_RETRIES = 3;
 const BASE_DELAY  = 50; // ms
@@ -159,6 +160,10 @@ class Database {
   async query(text, params) {
     const client = await this._pool.connect();
     try {
+      // Enforce governance on all direct financial writes.
+      if (typeof text === 'string') {
+        guardFinancialWrite(text);
+      }
       return await client.query(text, params);
     } finally {
       client.release();
@@ -203,6 +208,16 @@ class Database {
       attempt++;
       const client = await this._pool.connect();
       try {
+        // Patch client.query for the lifetime of this transaction so governance
+        // is enforced even on direct `client.query(...)` inside tx blocks.
+        const originalClientQuery = client.query.bind(client);
+        client.query = async (text, params) => {
+          if (typeof text === 'string') {
+            guardFinancialWrite(text);
+          }
+          return originalClientQuery(text, params);
+        };
+
         await client.query(`SET LOCAL statement_timeout = ${stmtTimeout}`);
         await client.query(`SET LOCAL idle_in_transaction_session_timeout = ${stmtTimeout * 2}`);
         await client.query(`BEGIN ISOLATION LEVEL ${isolationLevel}`);

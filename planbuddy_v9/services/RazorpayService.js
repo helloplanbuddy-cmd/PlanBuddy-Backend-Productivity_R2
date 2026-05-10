@@ -2,8 +2,7 @@
 
 const { razorpay } = require('../config/razorpay');
 const crypto = require('crypto');
-const db = require('../config/db');
-const logger = require('../utils/logger');
+const FinancialStateManager = require('./FinancialStateManager');
 
 const WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET;
 
@@ -24,39 +23,78 @@ function verifySignature(payload, signature) {
 }
 
 /**
- * Process payment txn in SERIALIZABLE isolation (race-safe)
+ * Process payment txn using FinancialStateManager (single writer).
+ *
+ * IMPORTANT: This function MUST NOT do direct financial writes (no UPDATE/INSERT into payments/refunds/bookings).
  */
 async function processPaymentTransaction(orderId, paymentId, amount, currency, userId, correlationId, client) {
+  // We keep the signature compatible with existing callers,
+  // but we no longer perform direct SQL mutations here.
+  if (!client) {
+    throw new Error('processPaymentTransaction: client is required');
+  }
+
+  // Best-effort trace id for FSM logging.
+  const traceId = correlationId || `razorpay-${paymentId}`;
+
   let attempt = 0;
   while (attempt < 3) {
     try {
-      await client.query('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE');
-      
+      // Read path only: lock payment row to make the state read consistent.
       const payment = await client.query(
-        'SELECT * FROM payments WHERE razorpay_payment_id = $1 FOR UPDATE',
+        'SELECT id, status, booking_id FROM payments WHERE razorpay_payment_id = $1 FOR UPDATE',
         [paymentId]
       );
-      
-      if (payment.rows[0].status !== 'created') {
+
+      if (payment.rows.length === 0) {
+        throw new Error(`Payment not found for razorpay_payment_id=${paymentId}`);
+      }
+
+      const paymentRow = payment.rows[0];
+
+      // Idempotency: if already not in "created", do nothing (FSM will no-op if transition is same state).
+      if (paymentRow.status !== 'created') {
         return { idempotent: true };
       }
 
       const razorpayPayment = await razorpay.payments.fetch(paymentId);
+
       if (razorpayPayment.status !== 'captured') {
-        await client.query('UPDATE payments SET status = $1 WHERE id = $2', ['failed', payment.rows[0].id]);
+        await FinancialStateManager.transition(
+          'payment',
+          paymentRow.id,
+          paymentRow.status,
+          'failed',
+          { traceId, requestId: correlationId }
+        );
         return { idempotent: false };
       }
 
-      await client.query(`
-        UPDATE payments SET status = 'success' WHERE id = $1;
-        UPDATE bookings SET status = 'confirmed' WHERE id = (SELECT booking_id FROM payments WHERE id = $1);
-      `, [payment.rows[0].id]);
+      // captured => payment success + booking confirmed (both via FSM).
+      await FinancialStateManager.transition(
+        'payment',
+        paymentRow.id,
+        paymentRow.status,
+        'captured',
+        { traceId, requestId: correlationId, paymentId: paymentRow.id }
+      );
+
+      if (paymentRow.booking_id) {
+        await FinancialStateManager.transition(
+          'booking',
+          paymentRow.booking_id,
+          'pending',
+          'confirmed',
+          { traceId, requestId: correlationId, bookingId: paymentRow.booking_id }
+        );
+      }
 
       return { idempotent: false };
     } catch (err) {
-      if (err.code === '40001' && attempt < 2) { // serialization
+      // serialization retry (read-only + FSM internal transaction).
+      if (err.code === '40001' && attempt < 2) {
         attempt++;
-        await new Promise(r => setTimeout(r, 100 * attempt));
+        await new Promise((r) => setTimeout(r, 100 * attempt));
         continue;
       }
       throw err;
@@ -64,9 +102,7 @@ async function processPaymentTransaction(orderId, paymentId, amount, currency, u
   }
 }
 
-
 module.exports = {
   verifySignature,
   processPaymentTransaction,
 };
-

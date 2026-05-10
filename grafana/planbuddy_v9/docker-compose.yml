@@ -1,0 +1,79 @@
+services:
+  api:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      DATABASE_URL: postgresql://planbuddy:planbuddy@postgres:5432/planbuddy_dev?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      REDIS_QUEUE_URL: redis://redis:6379/1
+      JWT_SECRET: dev_secret_at_least_32_characters_long_for_local
+      JWT_EXPIRY: 24h
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-rzp_test_placeholder}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-placeholder}
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-placeholder}
+      CORS_ORIGINS: http://localhost:3000,http://localhost:5173
+      LOG_LEVEL: info
+      LOG_PRETTY: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  workers:
+    build: .
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://planbuddy:planbuddy@postgres:5432/planbuddy_dev?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      REDIS_QUEUE_URL: redis://redis:6379/1
+      JWT_SECRET: dev_secret_at_least_32_characters_long_for_local
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-rzp_test_placeholder}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-placeholder}
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-placeholder}
+      LOG_LEVEL: info
+      LOG_PRETTY: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: node workers/index.js
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: planbuddy
+      POSTGRES_PASSWORD: planbuddy
+      POSTGRES_DB: planbuddy_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U planbuddy -d planbuddy_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy noeviction
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres_data:
+  redis_data:
