@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2021",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "strict": false,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowJs": true,
+    "checkJs": false,
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "types": ["node"]
+  },
+  "include": [
+    "app.js",
+    "server.js",
+    "routes/**/*.js",
+    "controllers/**/*.js",
+    "middleware/**/*.js",
+    "services/**/*.js",
+    "workers/**/*.js",
+    "utils/**/*.js",
+    "config/**/*.js",
+    "guards/**/*.js",
+    "__tests__/**/*.js"
+  ],
+  "exclude": ["node_modules", "dist", "build"]
+}
