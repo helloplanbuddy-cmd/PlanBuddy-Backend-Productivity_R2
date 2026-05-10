@@ -38,3 +38,4 @@ fixed*.sql
 
 # Misc
 coverage/
+.kombai/
