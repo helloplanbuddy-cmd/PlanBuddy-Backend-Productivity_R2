@@ -31,7 +31,7 @@ const crypto     = require('crypto');
 const routes      = require('./routes');
 const errorHandler = require('./middleware/errorHandler');
 const apiVersion   = require('./middleware/apiVersion');
-// const { globalLimiter } = require('./middleware/rateLimit');
+const { globalLimiter } = require('./middleware/rateLimit');
 const monitoring  = require('./utils/monitoring');
 const logger      = require('./utils/logger');
 // 🚀 PHASE 2B: Trace ID middleware for full request observability
@@ -78,9 +78,7 @@ app.use((req, res, next) => {
 });
 
 // 🚀 PHASE 2B: Trace ID middleware — must come after requestId so it can inherit it.
-// Wraps every request in AsyncLocalStorage with trace_id so ALL logger calls
-// in this request automatically include { trace_id, service, user_id, booking_id }.
-// app.use(traceIdMiddleware);
+app.use(traceIdMiddleware);
 
 // ─── CORS ─────────────────────────────────────────────────────────────────────
 app.use(cors({
@@ -111,11 +109,11 @@ app.use(express.json({ limit: '512kb' }));
 app.use(express.urlencoded({ extended: true, limit: '512kb' }));
 
 // ─── Global rate limiter (all /api/* routes) ──────────────────────────────────
-// app.use('/api', globalLimiter);
+app.use('/api', globalLimiter);
 
 // 🚀 PHASE 4: Backpressure middleware (request throttling)
 const { backpressureMiddleware } = require('./middleware/backpressure');
-// app.use(backpressureMiddleware);
+app.use(backpressureMiddleware);
 
 // ─── Prometheus /metrics endpoint (internal IPs only) ─────────────────────────
 app.get('/metrics', async (req, res) => {
@@ -126,32 +124,13 @@ app.get('/metrics', async (req, res) => {
     return res.status(403).end('Forbidden');
   }
 
-// res.set('Content-Type', monitoring.register.contentType);
-// res.end(await monitoring.register.metrics());
-res.set('Content-Type', monitoring.register.contentType);
-res.end(await monitoring.register.metrics());
+  res.set('Content-Type', monitoring.register.contentType);
+  res.end(await monitoring.register.metrics());
 });
 
 // ─── Start production health cron ─────────────────────────────────────────────
 // const productionHealth = require('../services/productionHealth');
   // productionHealth.startCron();
-
-// ─── Prometheus request counter + duration histogram ─────────────────────────
-// app.use((req, res, next) => {
-  // const start = Date.now();
-
-  // monitoring.request_total.inc({ method: req.method, path: req.path });
-
-  // res.on('finish', () => {
-  //   const durationMs = Date.now() - start;
-  //   monitoring.request_duration_ms.observe(
-  //     { method: req.method, path: req.path, status: res.statusCode },
-  //     durationMs
-  //   );
-  // });
-
-  // next();
-  // });
 
 // ─── Structured Pino request logging ─────────────────────────────────────────
 app.use((req, res, next) => {

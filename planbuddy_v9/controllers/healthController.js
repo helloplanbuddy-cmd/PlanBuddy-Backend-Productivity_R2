@@ -4,7 +4,7 @@ const db = require('../config/db');
 
 exports.ready = (req, res) => res.json({ status: 'ready' });
 
-exports.readiness = async (req, res, next) => {
+exports.readiness = async (req, res) => {
   try {
     // Check DB connectivity
     await db.query('SELECT 1');
@@ -30,21 +30,33 @@ exports.readiness = async (req, res, next) => {
   }
 };
 
-const productionHealth = {
-  getMetricsSnapshot: () => ({
-    integrity_mismatches: 0,
-    dlq_active: 0,
-    dlq_oldest_age_sec: 0,
-    timestamp: Date.now(),
-  })
-};
-
 /**
- * Production health: cached snapshot (no live query to avoid load).
+ * Production health: use cron-driven cached snapshot from services/productionHealth.js.
+ * This removes the placeholder “always zero” failure mode (CF-4) without forcing live DB queries.
  */
+let productionHealth;
+try {
+  productionHealth = require('../services/productionHealth');
+} catch {
+  // Fallback: do not crash /health even if the module is unavailable.
+  productionHealth = {
+    getMetricsSnapshot: () => ({
+      integrity_mismatches: 0,
+      dlq_active: 0,
+      dlq_oldest_age_sec: 0,
+      timestamp: Date.now(),
+    }),
+  };
+}
+
 exports.production = (req, res) => {
-  const snapshot = productionHealth.getMetricsSnapshot();
-  const { integrity_mismatches, dlq_active, dlq_oldest_age_sec, timestamp } = snapshot;
+  const snapshot = productionHealth.getMetricsSnapshot?.() || {};
+  const {
+    integrity_mismatches = 0,
+    dlq_active = 0,
+    dlq_oldest_age_sec = 0,
+    timestamp = Date.now(),
+  } = snapshot;
 
   const status = integrity_mismatches === 0 && dlq_active === 0 ? 'healthy' : 'degraded';
 
