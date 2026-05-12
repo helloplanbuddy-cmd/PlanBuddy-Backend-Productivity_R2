@@ -24,7 +24,13 @@ const {
 const db               = require('../config/db.js');
 const logger           = require('../utils/logger.js');
 const monitoring       = require('../utils/monitoring.js');
-const PaymentAudit     = require('../services/paymentAuditService.js');
+let PaymentAudit = null;
+try {
+  PaymentAudit = require('../services/paymentAuditService.js');
+} catch (_) {
+  // Audit is non-critical for webhook->queue->worker financial correctness.
+  PaymentAudit = null;
+}
 const metrics          = require('../services/metricsService.js');
 const { updateTraceContext } = require('../middleware/traceId.js');
 
@@ -329,8 +335,9 @@ exports.razorpayWebhook = async (req, res, next) => {
               verified_at, verified_by_lease_version, correlation_id, status)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
            ON CONFLICT (provider, razorpay_event_id, signature) 
-             DO UPDATE SET status = 'processed' WHERE webhook_events.status = 'received'
-           RETURNING id, status`,
+             DO UPDATE SET status = 'received' WHERE webhook_events.status = 'received'
+           RETURNING id, status
+          `,
           [
             'razorpay',                              // provider
             eventId,                                 // razorpay_event_id (unique for provider)
@@ -352,26 +359,21 @@ exports.razorpayWebhook = async (req, res, next) => {
         }
 
         const webhookEventId = insertResult.rows[0].id;
-        const eventStatus = insertResult.rows[0].status;
-
         logger.info({ ...logCtx, webhook_event_id: webhookEventId }, '[webhook] Event stored with verified signature');
 
-        // Apply event using existing controller
-        await RazorpayService.processPaymentTransaction(
-          body?.razorpay_order_id,
-          body?.razorpay_payment_id,
-          body?.amount,
-          'INR',
-          null, // no user context for webhooks
-          correlationId,
-          client
-        );
-
-        // Mark as processed
-        await client.query(
-          `UPDATE webhook_events SET status = 'processed', processed_at = NOW() WHERE id = $1`,
-          [webhookEventId]
-        );
+        // Enqueue async processing job so the worker deterministically applies financial mutations.
+        try {
+          const { enqueueWebhookEvent } = require('../config/queues');
+          await enqueueWebhookEvent({
+            eventId,
+            provider: 'razorpay',
+            eventType: body?.event || body?.event_type,
+            payload: body,
+          });
+        } catch (e) {
+          logger.error({ err: e, eventId }, '[webhook] enqueueWebhookEvent failed');
+          // Do not rollback webhook_events persistence; worker replay/DLQ tooling can recover.
+        }
 
         logger.info(
           { ...logCtx, webhook_event_id: webhookEventId, signature: authResult.signature.substring(0, 8) + '...' },

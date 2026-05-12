@@ -97,6 +97,20 @@ const refundRetryQueue = new Queue('refund-retry', {
   },
 });
 
+/**
+ * webhook-events — event-driven
+ * Hardened webhook application pipeline.
+ * Queue inventory was missing this queue earlier; worker `webhook-processor.worker.js`
+ * consumes from `webhook-events`, so HTTP ingestion MUST enqueue here.
+ */
+const webhookEventsQueue = new Queue('webhook-events', {
+  connection,
+  defaultJobOptions: {
+    ...DEFAULT_JOB_OPTIONS,
+    // Keep defaults; worker enforces idempotency + lease fencing.
+  },
+});
+
 // ─── Scheduler: set up repeating jobs ────────────────────────────────────────
 
 async function scheduleRepeatableJobs() {
@@ -193,14 +207,57 @@ async function enqueueRefundRetry(data) {
   }
 }
 
+/**
+ * 🚀 Enqueue webhook event for async financial application.
+ * Minimal direct-enqueue fix: HTTP ingest MUST enqueue a `webhook-events` job.
+ *
+ * @param {object} data
+ * @param {string} data.eventId
+ * @param {string} data.provider
+ * @param {string} data.eventType
+ * @param {any} data.payload
+ */
+async function enqueueWebhookEvent(data) {
+  const logger = require('../utils/logger');
+  try {
+    const { eventId, provider, eventType, payload } = data;
+
+    if (!eventId || !provider || !eventType) {
+      logger.error({ data }, '[queues] enqueueWebhookEvent: missing required fields');
+      return null;
+    }
+
+    const job = await webhookEventsQueue.add(
+      'webhook-event',
+      { eventId, provider, eventType, payload },
+      {
+        // Deterministic jobId for idempotent enqueue (BullMQ dedup by jobId)
+        jobId: `webhook-${provider}-${eventId}`,
+      }
+    );
+
+    logger.info(
+      { jobId: job.id, eventId, eventType, provider },
+      '[queues] 🚀 webhook-events job enqueued'
+    );
+
+    return job;
+  } catch (err) {
+    logger.error({ err, data }, '[queues] Failed to enqueue webhook-events job');
+    return null;
+  }
+}
+
 module.exports = {
   bookingExpiryQueue,
   reconciliationQueue,
   emailQueue,
   refundRetryQueue,
+  webhookEventsQueue,
   scheduleRepeatableJobs,
   closeQueues,
   enqueueEmail,
   enqueueRefundRetry,
+  enqueueWebhookEvent,
   connection,
 };
