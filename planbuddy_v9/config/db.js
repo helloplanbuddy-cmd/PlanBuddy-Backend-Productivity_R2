@@ -157,11 +157,44 @@ class Database {
 
   // ─── Simple query (READ COMMITTED, uses pool directly) ──────────────────────
   async query(text, params) {
-    const client = await this._pool.connect();
+    let client;
+
     try {
+      client = await this._pool.connect();
       return await client.query(text, params);
+    } catch (err) {
+      // Deep logging to expose the real underlying PG cause behind pg-pool AggregateError.
+      console.error('================ DB CONNECT FAILURE ================');
+      console.error('FULL ERROR:', err);
+
+      if (err?.errors) {
+        console.error('INNER ERRORS:');
+        for (const inner of err.errors) {
+          console.error({
+            message: inner.message,
+            code: inner.code,
+            errno: inner.errno,
+            syscall: inner.syscall,
+            address: inner.address,
+            port: inner.port,
+            stack: inner.stack,
+          });
+        }
+      }
+
+      console.error('DB ENV:', {
+        host: process.env.DB_HOST,
+        port: process.env.DB_PORT,
+        database: process.env.DB_NAME,
+        user: process.env.DB_USER,
+        ssl: process.env.DB_SSL,
+        nodeEnv: process.env.NODE_ENV,
+      });
+      console.error('====================================================');
+
+      throw err;
     } finally {
-      client.release();
+      if (client) client.release();
     }
   }
 

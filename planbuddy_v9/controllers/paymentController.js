@@ -263,8 +263,25 @@ exports.manualReconcile = async (req, res, next) => {
 };
 
 // ─── POST /payment/webhook/razorpay (handler) ─────────────────────────────
+/**
+ * Razorpay Webhook Handler — Unified Authenticity Model
+ *
+ * FLOW:
+ *  1. Extract raw payload + signature from request
+ *  2. Verify signature IMMEDIATELY (fails fast if invalid)
+ *  3. Store payload + signature + verified_at atomically
+ *  4. Apply webhook event within transaction
+ *  5. Update webhook_events.status to 'processed' on success
+ *  6. On UNIQUE violation (duplicate): return 200 (idempotent)
+ *
+ * SECURITY:
+ *  - Signature verification BEFORE any mutation
+ *  - Payload + signature stored for replay re-verification
+ *  - Replay paths MUST re-verify before applying
+ */
 exports.razorpayWebhook = async (req, res, next) => {
   try {
+    const webhookAuthService = require('../services/webhookAuthenticityService');
     const signature = req.headers['x-razorpay-signature'];
     const correlationId = req.requestId;
     const body = req.body;
@@ -277,6 +294,8 @@ exports.razorpayWebhook = async (req, res, next) => {
         message: 'Missing razorpay_event_id / razorpay_payment_id',
       });
     }
+
+    const logCtx = { eventId, correlationId, eventType: body?.event || body?.event_type };
 
     // Fintech: Webhook retry storm detector (best-effort)
     try {
@@ -296,38 +315,101 @@ exports.razorpayWebhook = async (req, res, next) => {
       // ignore (fail-open)
     }
 
-    // Verify signature before any state mutation
-    RazorpayService.verifySignature(
-      `${body?.razorpay_order_id}|${body?.razorpay_payment_id}`,
-      signature
-    );
+    // ─── PHASE 1: Verify signature BEFORE any state mutation ──────────────────
+    const payloadBytes = webhookAuthService.extractPayloadBytes(body);
+    const authResult = webhookAuthService.verifyIngressSignature(payloadBytes, signature, logCtx);
 
-    // Persist event (unique idempotency) + process within a single DB transaction
+    // ─── PHASE 2: Store event + verify + apply in atomic transaction ─────────
     await db.transaction(async (client) => {
-      await client.query(
-        `INSERT INTO webhook_events (razorpay_event_id, event_type, payload, correlation_id)
-         VALUES ($1, $2, $3, $4)`,
-        [eventId, body?.event || body?.event_type || null, JSON.stringify(body), correlationId]
-      );
+      try {
+        // Insert webhook event with signature + payload + verified timestamp
+        const insertResult = await client.query(
+          `INSERT INTO webhook_events 
+             (provider, razorpay_event_id, event_type, payload, payload_bytes, signature, 
+              verified_at, verified_by_lease_version, correlation_id, status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           ON CONFLICT (provider, razorpay_event_id, signature) 
+             DO UPDATE SET status = 'processed' WHERE webhook_events.status = 'received'
+           RETURNING id, status`,
+          [
+            'razorpay',                              // provider
+            eventId,                                 // razorpay_event_id (unique for provider)
+            body?.event || body?.event_type,        // event_type
+            JSON.stringify(body),                    // payload (for backward compat)
+            payloadBytes,                            // payload_bytes (exact raw bytes)
+            authResult.signature,                    // signature (HMAC-SHA256)
+            new Date(),                              // verified_at (now)
+            1,                                       // verified_by_lease_version (initial lease)
+            correlationId,                           // correlation_id
+            'received'                               // status (awaiting processing)
+          ]
+        );
 
-      await RazorpayService.processPaymentTransaction(
-        body?.razorpay_order_id,
-        body?.razorpay_payment_id,
-        body?.amount,
-        'INR',
-        null,
-        correlationId,
-        client
-      );
+        if (insertResult.rowCount === 0) {
+          // Duplicate — already processed
+          logger.info(logCtx, '[webhook] Event already ingested (idempotent)');
+          return { idempotent: true };
+        }
+
+        const webhookEventId = insertResult.rows[0].id;
+        const eventStatus = insertResult.rows[0].status;
+
+        logger.info({ ...logCtx, webhook_event_id: webhookEventId }, '[webhook] Event stored with verified signature');
+
+        // Apply event using existing controller
+        await RazorpayService.processPaymentTransaction(
+          body?.razorpay_order_id,
+          body?.razorpay_payment_id,
+          body?.amount,
+          'INR',
+          null, // no user context for webhooks
+          correlationId,
+          client
+        );
+
+        // Mark as processed
+        await client.query(
+          `UPDATE webhook_events SET status = 'processed', processed_at = NOW() WHERE id = $1`,
+          [webhookEventId]
+        );
+
+        logger.info(
+          { ...logCtx, webhook_event_id: webhookEventId, signature: authResult.signature.substring(0, 8) + '...' },
+          '[webhook] Event processed successfully'
+        );
+
+        return { applied: true };
+      } catch (err) {
+        // If UNIQUE violation occurs, it means we already ingested this event
+        // (same event_id + signature combo). Return success to make Razorpay happy.
+        if (err?.code === '23505') {
+          logger.info(logCtx, '[webhook] UNIQUE violation — duplicate ingestion (idempotent)');
+          return { idempotent: true, duplicate: true };
+        }
+
+        throw err;
+      }
     });
 
     return res.json({ success: true });
   } catch (err) {
-    // UNIQUE violation => duplicate webhook retry / already inserted
+    // UNIQUE violation at webhook insert => duplicate (already processed)
     if (err?.code === '23505') {
+      logger.info({ eventId: req.body?.razorpay_event_id }, '[webhook] Duplicate webhook (returning 200)');
       return res.status(200).json({ success: true, idempotent: true });
     }
 
+    // Signature mismatch or missing => 401/400
+    if (err?.code === 'WEBHOOK_SIGNATURE_MISMATCH' || err?.code === 'WEBHOOK_INVALID_PAYLOAD' || err?.code === 'WEBHOOK_MISSING_SIGNATURE') {
+      monitoring.webhook_auth_failures_total?.inc({ reason: err.code });
+      return res.status(err.status || 401).json({
+        success: false,
+        code: err.code,
+        message: err.message,
+      });
+    }
+
+    // Other errors
     if (err?.status === 404 || err?.status === 409) {
       return res.status(200).json({
         success: false,
