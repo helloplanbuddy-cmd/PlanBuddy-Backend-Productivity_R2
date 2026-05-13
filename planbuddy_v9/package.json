@@ -7,6 +7,8 @@
     "test": "jest --verbose",
     "test:financial": "jest --verbose --testPathPattern=financial-idempotency",
     "test:concurrency": "jest --verbose --testPathPattern=concurrency",
+    "test:integration:idempotency-key-validation": "jest --runInBand --verbose --testPathPattern=tests/integration/idempotency-key-validation.test.js",
+    "test:integration:refund-race-condition": "jest --runInBand --verbose --testPathPattern=tests/integration/refund-race-condition.test.js",
     "workers": "node workers/index.js",
     "worker:webhook": "node workers/start-webhook.js",
     "worker:refund": "node workers/start-refund.js",
@@ -28,6 +30,7 @@
     "prom-client": "^15.0.0",
     "rate-limit-redis": "^4.3.1",
     "razorpay": "^2.9.0",
+    "uuid": "^9.0.1",
     "zod": "^4.4.2"
   },
   "devDependencies": {

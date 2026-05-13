@@ -119,9 +119,10 @@ validateClusterPoolSafety();
 
 class Database {
   constructor() {
+    const wantsSsl = /[?&]sslmode=|[?&]ssl=/.test(env.DATABASE_URL);
     this._pool = new Pool({
       connectionString:        env.DATABASE_URL,
-      ssl:                     { rejectUnauthorized: false }, // required for Supabase / hosted PG
+      ssl:                     wantsSsl ? { rejectUnauthorized: false } : false,
       max:                     env.DB_POOL_MAX,
       idleTimeoutMillis:       env.DB_IDLE_TIMEOUT_MS,
       connectionTimeoutMillis: env.DB_CONNECTION_TIMEOUT_MS,
